@@ -2,7 +2,7 @@
 
 ## Assignment Overview
 
-This project implements a distributed application for synchronizing product sales data between **two Branch Offices (BO)** and one **Head Office (HO)**. The context is a network with limited internet connectivity (only 1–2 hours per day). The solution uses **RabbitMQ** as a reliable message broker to ensure data consistency even when the HO is temporarily offline.
+This project is a distributed application (BO1 + BO2 + HO) meant to synchronize product sales data between **two Branch Offices (BO)** and one **Head Office (HO)**. The context is a network with limited internet connectivity (only 1–2 hours per day). The design uses **RabbitMQ** as a reliable message broker so data can be queued while the HO is temporarily offline.
 
 ### Business Scenario
 
@@ -19,69 +19,102 @@ This project implements a distributed application for synchronizing product sale
 - Use **PostgreSQL** as the database (original spec allowed MySQL, but we chose PostgreSQL).
 - Run two independent producer processes (one per BO) and one consumer process (HO).
 
-### What We Built
+## Repository Layout
 
-- **`ho-backend`** : Spring Boot application that:
-  - Consumes sales messages from a RabbitMQ queue.
-  - Stores consolidated sales in `ho_db` with deduplication (`(bo_id, local_sale_id)` unique constraint).
-  - Exposes a REST API (`/api/sales`) and a simple frontend dashboard to view all sales.
-- **`bo-producer-1`** and **`bo-producer-2`** : Two identical Spring Boot applications (different configs) that:
-  - Periodically scan their local `product_sales` table for unsynchronized rows (`synced = false`).
-  - Send each new sale as a JSON message to a RabbitMQ exchange.
-  - Mark the row as `synced = true` after successful publication.
-- **RabbitMQ** acts as the message broker with a durable queue and persistent messages.
+- **`ho-backend/`**: Spring Boot application (HO consumer + API placeholder)
+- **`bo-producer-1/`**: Spring Boot application (BO1 producer placeholder)
+- **`bo-producer-2/`**: Spring Boot application (BO2 producer placeholder)
+- **`docker-compose.yml`**: Local infrastructure (PostgreSQL + RabbitMQ + Adminer)
 
+## Current Status
+
+The repository currently provides:
+
+- Dockerized infrastructure for **PostgreSQL**, **RabbitMQ**, and **Adminer**.
+- Three Spring Boot modules with configuration already wired for:
+  - PostgreSQL connection (via `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`)
+  - RabbitMQ connection (via `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USERNAME`, `RABBITMQ_PASSWORD`)
+  - Messaging parameters (exchange / routing-key / queue)
+
+What is **not** implemented yet (still to be added for the full assignment):
+
+- BO side: `product_sales` entity/repository + a scheduler to publish unsynced rows
+- HO side: queue consumer + consolidated sales entity + deduplication logic
+- REST API + dashboard for viewing consolidated sales
 
 ## Prerequisites
 
 - Java 21
 - Maven 3.9+ (or use each module's `./mvnw`)
-- PostgreSQL 14+
-- RabbitMQ 3.12+
+- Docker + Docker Compose (recommended for PostgreSQL/RabbitMQ/Adminer)
 
 ## Setup and Run
 
-### 1) Prepare Environment Files
+### 1) Environment Files
 
-For each module, copy `.env.example` to `.env` and edit values:
+This repo uses `.env` files for configuration:
+
+- **Root `.env`**: used by `docker-compose.yml` (PostgreSQL/RabbitMQ/Adminer settings)
+- **Module `.env`** (inside each module folder): used by Spring Boot at runtime
+
+Defaults already exist in the repo, but you can regenerate them from the examples:
 
 ```bash
+cp .env.example .env
 cp bo-producer-1/.env.example bo-producer-1/.env
 cp bo-producer-2/.env.example bo-producer-2/.env
 cp ho-backend/.env.example ho-backend/.env
 ```
 
-Update at least:
+Minimal values to review:
 
-- `DB_PASSWORD`
-- `RABBITMQ_USERNAME` / `RABBITMQ_PASSWORD` (if not using default guest/guest)
-- Any host/port overrides for your machine
+- Root `.env`: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `RABBITMQ_USERNAME`, `RABBITMQ_PASSWORD`
+- Module `.env`: `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`, `RABBITMQ_HOST`, `RABBITMQ_PORT`
 
-### 2) Start PostgreSQL and RabbitMQ
+### 2) Start Infrastructure (PostgreSQL + RabbitMQ + Adminer)
 
-You can use local services or Docker.
-
-Example RabbitMQ with Docker:
+Start services using Docker Compose:
 
 ```bash
-docker run -d --name rabbitmq \
-  -p 5672:5672 -p 15672:15672 \
-  rabbitmq:3-management
+docker compose up -d postgres rabbitmq adminer
 ```
 
-RabbitMQ Management UI: `http://localhost:15672`.
+Useful URLs/ports (defaults):
+
+- RabbitMQ Management UI: http://localhost:15672 (default `guest/guest`)
+- Adminer UI: http://localhost:8085
+- PostgreSQL: localhost:5432
 
 ### 3) Create Databases
 
-Create the 3 databases used by the modules:
+Create the 3 databases used by the modules (`bo1_db`, `bo2_db`, `ho_db`).
 
-```sql
-CREATE DATABASE bo1_db;
-CREATE DATABASE bo2_db;
-CREATE DATABASE ho_db;
+If you use Docker Compose PostgreSQL, you can run:
+
+```bash
+docker exec -it postgres psql -U postgres -c "CREATE DATABASE bo1_db;"
+docker exec -it postgres psql -U postgres -c "CREATE DATABASE bo2_db;"
+docker exec -it postgres psql -U postgres -c "CREATE DATABASE ho_db;"
 ```
 
+If you changed the PostgreSQL user in the root `.env`, replace `postgres` accordingly.
+
+Or create them from Adminer.
+
 ### 4) Run the Applications (3 terminals)
+
+Note: choose **one** run mode:
+
+- **Mode A (recommended for infra only):** run `postgres`/`rabbitmq`/`adminer` with Docker Compose, then run the 3 Spring Boot apps locally with `./mvnw spring-boot:run`.
+- **Mode B (all-in-Docker):** run the apps using `docker compose up -d --build`.
+
+If you already started the `ho-backend` container (Mode B), port `8080` is already taken. Either stop the container:
+
+```bash
+docker compose stop ho-backend
+```
+
+…or change the local port by editing `ho-backend/.env` (`SERVER_PORT`) before running.
 
 Start HO backend:
 
@@ -113,16 +146,13 @@ Default ports:
 ### 5) Verify Services Are Up
 
 - Check logs in each terminal for successful Spring Boot startup.
-- If HO API is implemented, verify endpoints under: `http://localhost:8080/api/sales`
-- Use RabbitMQ UI to check queues/exchanges and message flow.
 
-## Notes for the Assignment Deliverable
+Since the producer/consumer logic and API are not implemented yet, validation at this stage is mainly:
 
-- The infrastructure, module split, and configuration are in place.
-- The next implementation milestone is adding:
-  - BO-side `product_sales` entity/repository + scheduler for unsynced rows
-  - RabbitMQ publisher with persistent messages
-  - HO-side message consumer + consolidated sales entity with unique `(bo_id, local_sale_id)`
-  - REST API and dashboard integration
+- Spring Boot starts without errors
+- Each service connects to PostgreSQL and RabbitMQ using its `.env`
+- RabbitMQ UI is reachable and shows the declared exchange/queue once you implement the messaging configuration
 
+## Notes
 
+- If you want to run the apps inside Docker as well, `docker-compose.yml` already defines `ho-backend`, `bo-producer-1`, and `bo-producer-2` services. Make sure the environment variables provided to those containers match what the Spring Boot `application.properties` expects (the modules read `DB_URL/DB_USERNAME/DB_PASSWORD` from `.env`).

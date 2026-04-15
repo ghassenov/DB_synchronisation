@@ -10,7 +10,7 @@ Each BO app is now a standalone web server with:
 
 - local database CRUD API (`/api/sales`)
 - local frontend at `/`
-- scheduled RabbitMQ publisher for pending sync events
+- direct RabbitMQ publish on each CRUD operation
 
 The HO app provides:
 
@@ -22,9 +22,8 @@ The HO app provides:
 
 1. User inserts/updates/deletes a sale in BO1 or BO2 UI.
 2. BO writes the local change to `product_sales`.
-3. BO also writes a sync event to `sale_sync_events` (`UPSERT` or `DELETE`).
-4. BO scheduler publishes unsynced events to RabbitMQ.
-5. HO consumes the message:
+3. BO immediately publishes a RabbitMQ event (`UPSERT` or `DELETE`).
+4. HO consumes the message:
 - `UPSERT`: create or update row in `consolidated_sales`
 - `DELETE`: remove row from `consolidated_sales`
 
@@ -134,10 +133,9 @@ HO API examples:
 ## Quick End-to-End Check
 
 1. Open BO1 UI and create a row.
-2. Wait up to `SYNC_INTERVAL_MS` (default 10s).
-3. Open HO UI and confirm the row appears.
-4. Update the same BO1 row and confirm HO updates.
-5. Delete the BO1 row and confirm HO deletes it.
+2. Open HO UI and confirm the row appears.
+3. Update the same BO1 row and confirm HO updates.
+4. Delete the BO1 row and confirm HO deletes it.
 
 Repeat from BO2 to validate both producers.
 

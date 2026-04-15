@@ -1,11 +1,11 @@
 package com.sales.bo.service;
 
 import com.sales.bo.domain.ProductSale;
-import com.sales.bo.domain.SaleSyncEvent;
+import com.sales.bo.dto.SaleMessage;
 import com.sales.bo.dto.SaleUpsertRequest;
 import com.sales.bo.repository.ProductSaleRepository;
-import com.sales.bo.repository.SaleSyncEventRepository;
 import java.util.List;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -13,11 +13,17 @@ import org.springframework.transaction.annotation.Transactional;
 public class BoSalesService {
 
     private final ProductSaleRepository productSaleRepository;
-    private final SaleSyncEventRepository saleSyncEventRepository;
+    private final SalePublisherService salePublisherService;
+    private final String boId;
 
-    public BoSalesService(ProductSaleRepository productSaleRepository, SaleSyncEventRepository saleSyncEventRepository) {
+    public BoSalesService(
+        ProductSaleRepository productSaleRepository,
+        SalePublisherService salePublisherService,
+        @Value("${bo.id}") String boId
+    ) {
         this.productSaleRepository = productSaleRepository;
-        this.saleSyncEventRepository = saleSyncEventRepository;
+        this.salePublisherService = salePublisherService;
+        this.boId = boId;
     }
 
     public List<ProductSale> getAllSales() {
@@ -29,7 +35,7 @@ public class BoSalesService {
         ProductSale sale = new ProductSale();
         applyRequest(sale, request);
         ProductSale saved = productSaleRepository.save(sale);
-        saleSyncEventRepository.save(toUpsertEvent(saved));
+        publishUpsert(saved);
         return saved;
     }
 
@@ -38,20 +44,15 @@ public class BoSalesService {
         ProductSale sale = productSaleRepository.findById(id).orElseThrow();
         applyRequest(sale, request);
         ProductSale saved = productSaleRepository.save(sale);
-        saleSyncEventRepository.save(toUpsertEvent(saved));
+        publishUpsert(saved);
         return saved;
     }
 
     @Transactional
     public void deleteSale(Long id) {
         ProductSale sale = productSaleRepository.findById(id).orElseThrow();
-
-        SaleSyncEvent deleteEvent = new SaleSyncEvent();
-        deleteEvent.setOperation("DELETE");
-        deleteEvent.setSaleId(sale.getId());
-        saleSyncEventRepository.save(deleteEvent);
-
         productSaleRepository.delete(sale);
+        publishDelete(id);
     }
 
     private void applyRequest(ProductSale sale, SaleUpsertRequest request) {
@@ -65,18 +66,27 @@ public class BoSalesService {
         sale.setTotal(request.getTotal());
     }
 
-    private SaleSyncEvent toUpsertEvent(ProductSale sale) {
-        SaleSyncEvent event = new SaleSyncEvent();
-        event.setOperation("UPSERT");
-        event.setSaleId(sale.getId());
-        event.setDate(sale.getDate());
-        event.setRegion(sale.getRegion());
-        event.setProduct(sale.getProduct());
-        event.setQty(sale.getQty());
-        event.setCost(sale.getCost());
-        event.setAmt(sale.getAmt());
-        event.setTax(sale.getTax());
-        event.setTotal(sale.getTotal());
-        return event;
+    private void publishUpsert(ProductSale sale) {
+        SaleMessage message = new SaleMessage();
+        message.setOperation("UPSERT");
+        message.setBoId(boId);
+        message.setLocalSaleId(sale.getId());
+        message.setDate(sale.getDate());
+        message.setRegion(sale.getRegion());
+        message.setProduct(sale.getProduct());
+        message.setQty(sale.getQty());
+        message.setCost(sale.getCost());
+        message.setAmt(sale.getAmt());
+        message.setTax(sale.getTax());
+        message.setTotal(sale.getTotal());
+        salePublisherService.publishEvent(message);
+    }
+
+    private void publishDelete(Long localSaleId) {
+        SaleMessage message = new SaleMessage();
+        message.setOperation("DELETE");
+        message.setBoId(boId);
+        message.setLocalSaleId(localSaleId);
+        salePublisherService.publishEvent(message);
     }
 }

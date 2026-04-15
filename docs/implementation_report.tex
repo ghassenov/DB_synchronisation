@@ -1,0 +1,421 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{longtable}
+\usepackage{setspace}
+
+\geometry{margin=1in}
+\setstretch{1.12}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  urlcolor=blue!60!black,
+  pdftitle={Distributed Sales Synchronization - Implementation Report},
+  pdfauthor={Project Team}
+}
+
+\definecolor{codebg}{RGB}{248,248,248}
+\definecolor{codekw}{RGB}{0,70,140}
+\definecolor{codecom}{RGB}{0,120,0}
+\definecolor{codestr}{RGB}{170,60,0}
+
+\lstdefinestyle{javastyle}{
+  language=Java,
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{codekw}\bfseries,
+  commentstyle=\color{codecom},
+  stringstyle=\color{codestr},
+  showstringspaces=false,
+  breaklines=true,
+  frame=single,
+  framerule=0.2pt,
+  tabsize=2
+}
+
+\lstdefinestyle{propstyle}{
+  language={},
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  showstringspaces=false,
+  breaklines=true,
+  frame=single,
+  framerule=0.2pt,
+  tabsize=2
+}
+
+\title{Distributed Sales Synchronization\\Implementation and Design Report}
+\author{DB\_synchronisation Project}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Executive Summary}
+This project implements a distributed data synchronization platform for two branch-office systems (BO1 and BO2) and a head-office system (HO). The two branch systems are independent operational systems with their own local PostgreSQL databases and local web frontends for CRUD operations. The HO system is a consolidation platform that receives events over RabbitMQ and materializes a central \texttt{consolidated\_sales} dataset.
+
+The central architectural idea is \textbf{event-driven synchronization}: every branch-side create, update, and delete operation emits a RabbitMQ message, and HO consumes these messages to perform idempotent upsert/delete operations in its own database.
+
+\section{Problem Context and Goals}
+\subsection{Business Context}
+The system models geographically separated sales branches that need to continuously synchronize operational data to a central office. The architecture must satisfy the following:
+\begin{itemize}[leftmargin=*]
+  \item Allow branches to operate locally and independently.
+  \item Keep HO in sync with branch data.
+  \item Support insert, update, and delete semantics end-to-end.
+  \item Avoid strong temporal coupling between branch request execution and HO data materialization.
+\end{itemize}
+
+\subsection{Technical Goals}
+\begin{itemize}[leftmargin=*]
+  \item Expose standalone BO and HO web applications with frontend pages.
+  \item Expose CRUD REST APIs on all services.
+  \item Use RabbitMQ as asynchronous transport from BO to HO.
+  \item Use durable messaging and resilient exchange/queue configuration.
+  \item Preserve clear message contract and deterministic HO merge logic.
+\end{itemize}
+
+\section{System Architecture}
+\subsection{High-Level Flow}
+\begin{enumerate}[leftmargin=*]
+  \item A user creates/updates/deletes a sale in BO1 or BO2 UI.
+  \item BO persists the local transaction in its \texttt{product\_sales} table.
+  \item BO publishes a domain event to RabbitMQ with operation type \texttt{UPSERT} or \texttt{DELETE}.
+  \item HO listens to the queue, deserializes the event, and applies the corresponding mutation to \texttt{consolidated\_sales}.
+\end{enumerate}
+
+\subsection{Module Roles}
+\begin{longtable}{|p{0.2\linewidth}|p{0.72\linewidth}|}
+\hline
+\textbf{Module} & \textbf{Role} \\
+\hline
+BO1 / BO2 & Local operational systems: CRUD API + frontend + direct event publisher to RabbitMQ. \\
+\hline
+HO & Consolidation system: queue listener + idempotent upsert/delete + consolidation API + frontend. \\
+\hline
+RabbitMQ & Message broker for asynchronous BO $\rightarrow$ HO transport. \\
+\hline
+PostgreSQL & Persistence layer for each module (\texttt{bo1\_db}, \texttt{bo2\_db}, \texttt{ho\_db}). \\
+\hline
+\end{longtable}
+
+\section{Data Contract and Event Semantics}
+\subsection{Message Structure}
+The message schema is represented by \texttt{SaleMessage}. It includes:
+\begin{itemize}[leftmargin=*]
+  \item \texttt{operation} (\texttt{UPSERT} or \texttt{DELETE})
+  \item \texttt{boId} and \texttt{localSaleId} as event identity across modules
+  \item Sales payload fields (date, region, product, qty, cost, amt, tax, total)
+\end{itemize}
+
+\begin{lstlisting}[style=javastyle,caption={Simplified event contract (BO side)}]
+public class SaleMessage {
+    private String operation;
+    private String boId;
+    private Long localSaleId;
+    private LocalDate date;
+    private String region;
+    private String product;
+    private Integer qty;
+    private BigDecimal cost;
+    private BigDecimal amt;
+    private BigDecimal tax;
+    private BigDecimal total;
+}
+\end{lstlisting}
+
+\subsection{Why an Explicit Operation Field?}
+The \texttt{operation} field avoids ambiguity in event interpretation:
+\begin{itemize}[leftmargin=*]
+  \item \texttt{UPSERT} means ``create or update this logical sale key''.
+  \item \texttt{DELETE} means ``remove this logical sale key''.
+\end{itemize}
+This design keeps the consumer logic deterministic and explicit, and avoids relying on null field heuristics to infer intent.
+
+\section{RabbitMQ Design and Rationale}
+\subsection{Exchange and Queue Topology}
+The system uses:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Topic exchange}: \texttt{sales.exchange} (durable)
+  \item \textbf{Queue}: \texttt{sales.hq} (durable)
+  \item \textbf{Routing key}: \texttt{sales.hq}
+\end{itemize}
+
+\begin{lstlisting}[style=javastyle,caption={HO queue/exchange/binding configuration}]
+@Bean
+public Queue salesQueue(@Value("${rabbitmq.queue}") String queueName) {
+    return new Queue(queueName, true);
+}
+
+@Bean
+public TopicExchange salesExchange(@Value("${rabbitmq.exchange}") String exchangeName) {
+    return new TopicExchange(exchangeName, true, false);
+}
+
+@Bean
+public Binding salesBinding(Queue salesQueue, TopicExchange salesExchange,
+                            @Value("${rabbitmq.routing-key}") String routingKey) {
+    return BindingBuilder.bind(salesQueue).to(salesExchange).with(routingKey);
+}
+\end{lstlisting}
+
+\subsection{Durability Choices}
+Two durability decisions are implemented:
+\begin{enumerate}[leftmargin=*]
+  \item Durable exchange and durable queue declarations.
+  \item Persistent message delivery mode at publish time.
+\end{enumerate}
+
+\begin{lstlisting}[style=javastyle,caption={Publisher uses persistent delivery mode}]
+public void publishEvent(SaleMessage saleMessage) {
+    rabbitTemplate.convertAndSend(exchangeName, routingKey, saleMessage, message -> {
+        message.getMessageProperties().setDeliveryMode(MessageDeliveryMode.PERSISTENT);
+        return message;
+    });
+}
+\end{lstlisting}
+
+This combination improves survivability in broker restarts and aligns with the reliability requirements of distributed synchronization.
+
+\subsection{JSON Serialization Strategy}
+The project configures Jackson-based message conversion and registers \texttt{JavaTimeModule} to correctly serialize/deserialize \texttt{LocalDate}.
+
+\begin{lstlisting}[style=javastyle,caption={Message converter with Java time support}]
+@Bean
+public MessageConverter jacksonMessageConverter() {
+    ObjectMapper objectMapper = new ObjectMapper();
+    objectMapper.registerModule(new JavaTimeModule());
+    return new Jackson2JsonMessageConverter(objectMapper);
+}
+\end{lstlisting}
+
+Rationale:
+\begin{itemize}[leftmargin=*]
+  \item Human-readable payloads for observability/debugging.
+  \item Strong compatibility with Spring AMQP and Java domain objects.
+  \item Correct support for date/time types.
+\end{itemize}
+
+\section{Producer Flow (BO1/BO2)}
+\subsection{Current Implementation: Direct Publish per CRUD}
+Each BO service now publishes immediately after the local database mutation in the service layer.
+
+\begin{lstlisting}[style=javastyle,caption={BO direct publish on create/update/delete}]
+@Transactional
+public ProductSale createSale(SaleUpsertRequest request) {
+    ProductSale sale = new ProductSale();
+    applyRequest(sale, request);
+    ProductSale saved = productSaleRepository.save(sale);
+    publishUpsert(saved);
+    return saved;
+}
+
+@Transactional
+public void deleteSale(Long id) {
+    ProductSale sale = productSaleRepository.findById(id).orElseThrow();
+    productSaleRepository.delete(sale);
+    publishDelete(id);
+}
+\end{lstlisting}
+
+\subsection{Why We Switched to Direct Publish}
+The earlier design used a scheduler and an outbox table. That flow generated repeated polling queries and periodic logging noise. The redesign objective was to simplify operational behavior and remove unnecessary periodic Hibernate select statements.
+
+Reasons for switching:
+\begin{itemize}[leftmargin=*]
+  \item Lower implementation complexity for this project stage.
+  \item Immediate event emission, reducing perceived sync latency.
+  \item Cleaner BO logs (no periodic outbox polling query flood).
+\end{itemize}
+
+Trade-off acknowledged:
+\begin{itemize}[leftmargin=*]
+  \item Direct publish reduces decoupling between DB write and event publish compared to a transactional outbox pattern.
+\end{itemize}
+
+\section{Consumer Flow (HO)}
+\subsection{Listener Behavior}
+HO receives events and applies operation-specific logic.
+
+\begin{lstlisting}[style=javastyle,caption={HO listener applies DELETE vs UPSERT semantics}]
+@RabbitListener(queues = "${rabbitmq.queue}")
+@Transactional
+public void consumeSale(SaleMessage message) {
+    if ("DELETE".equalsIgnoreCase(message.getOperation())) {
+        consolidatedSaleRepository.deleteByBoIdAndLocalSaleId(
+            message.getBoId(), message.getLocalSaleId());
+        return;
+    }
+
+    ConsolidatedSale consolidatedSale = consolidatedSaleRepository
+        .findByBoIdAndLocalSaleId(message.getBoId(), message.getLocalSaleId())
+        .orElseGet(ConsolidatedSale::new);
+
+    if (consolidatedSale.getId() == null) {
+        consolidatedSale.setBoId(message.getBoId());
+        consolidatedSale.setLocalSaleId(message.getLocalSaleId());
+    }
+
+    mapFields(consolidatedSale, message);
+    consolidatedSaleRepository.save(consolidatedSale);
+}
+\end{lstlisting}
+
+\subsection{Idempotence and Merge Key}
+The logical identity is the pair \texttt{(boId, localSaleId)}. It is enforced both in logic and in schema via a unique constraint.
+
+\begin{lstlisting}[style=javastyle,caption={HO consolidated entity unique key}]
+@Entity
+@Table(
+  name = "consolidated_sales",
+  uniqueConstraints = @UniqueConstraint(columnNames = {"bo_id", "local_sale_id"})
+)
+public class ConsolidatedSale { ... }
+\end{lstlisting}
+
+This design prevents duplicate consolidated rows and makes repeated UPSERT events safe.
+
+\section{Configuration and Deployment Notes}
+\subsection{Runtime Configuration}
+BO and HO are parameterized through \texttt{.env} files imported by Spring.
+
+\begin{lstlisting}[style=propstyle,caption={BO relevant properties}]
+spring.config.import=optional:file:.env[.properties]
+server.port=${SERVER_PORT}
+spring.rabbitmq.host=${RABBITMQ_HOST}
+spring.rabbitmq.port=${RABBITMQ_PORT}
+rabbitmq.exchange=${RABBITMQ_EXCHANGE}
+rabbitmq.routing-key=${RABBITMQ_ROUTING_KEY}
+bo.id=${BO_ID}
+\end{lstlisting}
+
+\begin{lstlisting}[style=propstyle,caption={HO relevant properties}]
+spring.config.import=optional:file:.env[.properties]
+server.port=${SERVER_PORT}
+spring.rabbitmq.host=${RABBITMQ_HOST}
+spring.rabbitmq.port=${RABBITMQ_PORT}
+rabbitmq.queue=${RABBITMQ_QUEUE}
+rabbitmq.exchange=${RABBITMQ_EXCHANGE}
+rabbitmq.routing-key=${RABBITMQ_ROUTING_KEY}
+\end{lstlisting}
+
+\subsection{Why Frontend Does Not Need Separate Docker}
+Each frontend is served as static content by its Spring Boot service itself:
+\begin{itemize}[leftmargin=*]
+  \item BO1 UI from BO1 server.
+  \item BO2 UI from BO2 server.
+  \item HO UI from HO server.
+\end{itemize}
+So there is no independent frontend container requirement.
+
+\section{Design Decisions: Detailed Justification}
+\subsection{Decision 1: Event-Driven over Direct Synchronous BO-to-HO API}
+\textbf{Chosen:} RabbitMQ asynchronous events.\\
+\textbf{Why:}
+\begin{itemize}[leftmargin=*]
+  \item Better temporal decoupling: BO does not block waiting for HO API processing.
+  \item Better scalability for additional branch systems.
+  \item Better resilience characteristics through durable broker constructs.
+\end{itemize}
+
+\subsection{Decision 2: Topic Exchange Topology}
+\textbf{Chosen:} topic exchange with explicit routing key.\\
+\textbf{Why:}
+\begin{itemize}[leftmargin=*]
+  \item Flexible future extension for more consumers/routing patterns.
+  \item Compatible with current simple single-route setup.
+\end{itemize}
+
+\subsection{Decision 3: UPSERT/DELETE Event Model}
+\textbf{Chosen:} operation-aware messages.\\
+\textbf{Why:}
+\begin{itemize}[leftmargin=*]
+  \item Mirrors CRUD semantics exactly.
+  \item Avoids overloading one event shape for all intents.
+  \item Simplifies consumer branch logic and testing.
+\end{itemize}
+
+\subsection{Decision 4: Composite Business Key in HO}
+\textbf{Chosen:} unique key \texttt{(boId, localSaleId)}.\\
+\textbf{Why:}
+\begin{itemize}[leftmargin=*]
+  \item Natural identity in a multi-branch distributed context.
+  \item Enables deterministic merge and idempotent reprocessing.
+\end{itemize}
+
+\subsection{Decision 5: Direct Publish Redesign}
+\textbf{Previous:} scheduler + outbox polling model.\\
+\textbf{Current:} direct publish per CRUD call.\\
+\textbf{Why current decision:}
+\begin{itemize}[leftmargin=*]
+  \item Remove continuous query noise from polling.
+  \item Reduce conceptual complexity for the current scope.
+  \item Provide immediate propagation behavior.
+\end{itemize}
+
+\section{Operational Behavior of RabbitMQ in This System}
+\subsection{Lifecycle of a Single CRUD Action}
+Assume BO1 updates one sale row:
+\begin{enumerate}[leftmargin=*]
+  \item Request reaches BO1 REST endpoint.
+  \item Service updates \texttt{product\_sales} in BO1 PostgreSQL.
+  \item Service creates a \texttt{SaleMessage(operation=UPSERT, boId=BO1, localSaleId=...)}.
+  \item \texttt{RabbitTemplate} publishes to \texttt{sales.exchange} with routing key \texttt{sales.hq}.
+  \item RabbitMQ routes message to durable queue \texttt{sales.hq}.
+  \item HO listener consumes the message and upserts into \texttt{consolidated\_sales}.
+\end{enumerate}
+
+For delete, the same pipeline executes with \texttt{operation=DELETE}; HO removes the matching logical key.
+
+\subsection{Reliability Observations}
+Current implementation includes:
+\begin{itemize}[leftmargin=*]
+  \item Durable exchange and queue.
+  \item Persistent message publishing.
+  \item Consumer-side idempotent merge key.
+\end{itemize}
+
+Potential future hardening:
+\begin{itemize}[leftmargin=*]
+  \item Publisher confirms and retries.
+  \item Dead-letter queue for poison messages.
+  \item Explicit monitoring/metrics for lag and failure rates.
+\end{itemize}
+
+\section{Known Trade-Offs and Future Enhancements}
+\subsection{Trade-Offs}
+\begin{itemize}[leftmargin=*]
+  \item With direct publish, full transactional outbox guarantees are not present.
+  \item If broker is unavailable at exact publish instant, application-level recovery strategy is limited unless additional retry/persistence logic is introduced.
+\end{itemize}
+
+\subsection{Recommended Enhancements}
+\begin{enumerate}[leftmargin=*]
+  \item Add publisher confirms and failure callbacks.
+  \item Introduce dead-letter and retry policies at queue level.
+  \item Add integration tests for failure scenarios and idempotent replay.
+  \item If strong guaranteed delivery is required, reintroduce an outbox pattern with event relay worker, but with optimized logging and polling strategy.
+\end{enumerate}
+
+\section{Conclusion}
+The implemented system provides a clear, operational, and technically coherent distributed synchronization architecture:
+\begin{itemize}[leftmargin=*]
+  \item Branches remain independently operable and expose local CRUD UIs/APIs.
+  \item RabbitMQ mediates asynchronous BO-to-HO propagation.
+  \item HO applies deterministic upsert/delete logic using a stable composite identity.
+  \item The direct-publish redesign simplifies runtime behavior and removes scheduler polling noise while preserving event-driven consolidation semantics.
+\end{itemize}
+
+In summary, RabbitMQ is not only a transport utility in this implementation; it is the core integration mechanism that allows the system to remain modular, asynchronous, and extensible while maintaining coherent data synchronization across organizational boundaries.
+
+\end{document}

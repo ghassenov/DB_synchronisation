@@ -1,63 +1,43 @@
-# Distributed Database Synchronization with RabbitMQ
+# Distributed Sales Synchronization (BO1, BO2, HO)
 
-## Assignment Overview
+This project contains three Spring Boot applications:
 
-This project is a distributed application (BO1 + BO2 + HO) meant to synchronize product sales data between **two Branch Offices (BO)** and one **Head Office (HO)**. The context is a network with limited internet connectivity (only 1–2 hours per day). The design uses **RabbitMQ** as a reliable message broker so data can be queued while the HO is temporarily offline.
+1. BO1 server (`bo-producer-1`)
+2. BO2 server (`bo-producer-2`)
+3. HO backend (`ho-backend`)
 
-### Business Scenario
+Each BO app is now a standalone web server with:
 
-- Two physically separated sales branches (BO1, BO2) manage their own PostgreSQL databases.
-- Each branch maintains a `product_sales` table with daily sales records.
-- The Head Office must consolidate all sales data from both branches into a central database.
-- Synchronization is **initiated by each branch** (push model) using RabbitMQ queues.
-- Messages are persisted in RabbitMQ so no data is lost if the HO is unreachable.
+- local database CRUD API (`/api/sales`)
+- local frontend at `/`
+- direct RabbitMQ publish on each CRUD operation
 
-### Technical Constraints (from the assignment)
+The HO app provides:
 
-- Use **Java** with JDBC (here we use Spring Boot + Spring Data JPA).
-- Use **RabbitMQ** for asynchronous messaging.
-- Use **PostgreSQL** as the database (original spec allowed MySQL, but we chose PostgreSQL).
-- Run two independent producer processes (one per BO) and one consumer process (HO).
+- RabbitMQ consumer that applies BO changes to `consolidated_sales`
+- consolidated database CRUD API (`/api/sales`)
+- consolidated frontend at `/`
 
-## Repository Layout
+## How Synchronization Works
 
-- **`ho-backend/`**: Spring Boot application (HO consumer + API placeholder)
-- **`bo-producer-1/`**: Spring Boot application (BO1 producer placeholder)
-- **`bo-producer-2/`**: Spring Boot application (BO2 producer placeholder)
-- **`docker-compose.yml`**: Local infrastructure (PostgreSQL + RabbitMQ + Adminer)
+1. User inserts/updates/deletes a sale in BO1 or BO2 UI.
+2. BO writes the local change to `product_sales`.
+3. BO immediately publishes a RabbitMQ event (`UPSERT` or `DELETE`).
+4. HO consumes the message:
+- `UPSERT`: create or update row in `consolidated_sales`
+- `DELETE`: remove row from `consolidated_sales`
 
-## Current Status
-
-The repository currently provides:
-
-- Dockerized infrastructure for **PostgreSQL**, **RabbitMQ**, and **Adminer**.
-- Three Spring Boot modules with configuration already wired for:
-  - PostgreSQL connection (via `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`)
-  - RabbitMQ connection (via `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USERNAME`, `RABBITMQ_PASSWORD`)
-  - Messaging parameters (exchange / routing-key / queue)
-
-What is **not** implemented yet (still to be added for the full assignment):
-
-- BO side: `product_sales` entity/repository + a scheduler to publish unsynced rows
-- HO side: queue consumer + consolidated sales entity + deduplication logic
-- REST API + dashboard for viewing consolidated sales
+This means create, update, and delete operations from BO are synced to HO.
 
 ## Prerequisites
 
-- Java 21
-- Maven 3.9+ (or use each module's `./mvnw`)
-- Docker + Docker Compose (recommended for PostgreSQL/RabbitMQ/Adminer)
+- Java 21+
+- Docker + Docker Compose
+- Optional: `psql` CLI (or use Adminer)
 
-## Setup and Run
+## Environment Setup
 
-### 1) Environment Files
-
-This repo uses `.env` files for configuration:
-
-- **Root `.env`**: used by `docker-compose.yml` (PostgreSQL/RabbitMQ/Adminer settings)
-- **Module `.env`** (inside each module folder): used by Spring Boot at runtime
-
-Defaults already exist in the repo, but you can regenerate them from the examples:
+If needed, regenerate `.env` files:
 
 ```bash
 cp .env.example .env
@@ -66,30 +46,34 @@ cp bo-producer-2/.env.example bo-producer-2/.env
 cp ho-backend/.env.example ho-backend/.env
 ```
 
-Minimal values to review:
+Minimum values to set:
 
-- Root `.env`: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `RABBITMQ_USERNAME`, `RABBITMQ_PASSWORD`
-- Module `.env`: `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`, `RABBITMQ_HOST`, `RABBITMQ_PORT`
+- root `.env`: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_PORT`, `RABBITMQ_USERNAME`, `RABBITMQ_PASSWORD`
+- module `.env`: `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`, `RABBITMQ_HOST`, `RABBITMQ_PORT`
 
-### 2) Start Infrastructure (PostgreSQL + RabbitMQ + Adminer)
+Default module ports:
 
-Start services using Docker Compose:
+- HO: `8080`
+- BO1: `8081`
+- BO2: `8082`
+
+## Start Infrastructure
+
+From repository root:
 
 ```bash
 docker compose up -d postgres rabbitmq adminer
 ```
 
-Useful URLs/ports (defaults):
+Useful endpoints:
 
-- RabbitMQ Management UI: http://localhost:15672 (default `guest/guest`)
-- Adminer UI: http://localhost:8085
+- RabbitMQ Management: http://localhost:15672
+- Adminer: http://localhost:8085
 - PostgreSQL: localhost:5432
 
-### 3) Create Databases
+## Create Databases
 
-Create the 3 databases used by the modules (`bo1_db`, `bo2_db`, `ho_db`).
-
-If you use Docker Compose PostgreSQL, you can run:
+Create BO/HO databases once:
 
 ```bash
 docker exec -it postgres psql -U postgres -c "CREATE DATABASE bo1_db;"
@@ -97,62 +81,70 @@ docker exec -it postgres psql -U postgres -c "CREATE DATABASE bo2_db;"
 docker exec -it postgres psql -U postgres -c "CREATE DATABASE ho_db;"
 ```
 
-If you changed the PostgreSQL user in the root `.env`, replace `postgres` accordingly.
+If databases already exist, PostgreSQL will report that and you can continue.
 
-Or create them from Adminer.
+## Run All Applications
 
-### 4) Run the Applications (3 terminals)
+Open 3 terminals.
 
-Note: choose **one** run mode:
-
-- **Mode A (recommended for infra only):** run `postgres`/`rabbitmq`/`adminer` with Docker Compose, then run the 3 Spring Boot apps locally with `./mvnw spring-boot:run`.
-- **Mode B (all-in-Docker):** run the apps using `docker compose up -d --build`.
-
-If you already started the `ho-backend` container (Mode B), port `8080` is already taken. Either stop the container:
-
-```bash
-docker compose stop ho-backend
-```
-
-…or change the local port by editing `ho-backend/.env` (`SERVER_PORT`) before running.
-
-Start HO backend:
+Terminal 1:
 
 ```bash
 cd ho-backend
 ./mvnw spring-boot:run
 ```
 
-Start BO producer 1:
+Terminal 2:
 
 ```bash
 cd bo-producer-1
 ./mvnw spring-boot:run
 ```
 
-Start BO producer 2:
+Terminal 3:
 
 ```bash
 cd bo-producer-2
 ./mvnw spring-boot:run
 ```
 
-Default ports:
+## Frontends and APIs
 
-- HO backend: `8080`
-- BO producer 1: `8081`
-- BO producer 2: `8082`
+- BO1 UI: http://localhost:8081
+- BO2 UI: http://localhost:8082
+- HO UI: http://localhost:8080
 
-### 5) Verify Services Are Up
+All services expose CRUD API at `/api/sales`.
 
-- Check logs in each terminal for successful Spring Boot startup.
+BO API examples:
 
-Since the producer/consumer logic and API are not implemented yet, validation at this stage is mainly:
+- `GET /api/sales`
+- `POST /api/sales`
+- `PUT /api/sales/{id}`
+- `DELETE /api/sales/{id}`
 
-- Spring Boot starts without errors
-- Each service connects to PostgreSQL and RabbitMQ using its `.env`
-- RabbitMQ UI is reachable and shows the declared exchange/queue once you implement the messaging configuration
+HO API examples:
 
-## Notes
+- `GET /api/sales`
+- `POST /api/sales`
+- `PUT /api/sales/{id}`
+- `DELETE /api/sales/{id}`
 
-- If you want to run the apps inside Docker as well, `docker-compose.yml` already defines `ho-backend`, `bo-producer-1`, and `bo-producer-2` services. Make sure the environment variables provided to those containers match what the Spring Boot `application.properties` expects (the modules read `DB_URL/DB_USERNAME/DB_PASSWORD` from `.env`).
+## Quick End-to-End Check
+
+1. Open BO1 UI and create a row.
+2. Open HO UI and confirm the row appears.
+3. Update the same BO1 row and confirm HO updates.
+4. Delete the BO1 row and confirm HO deletes it.
+
+Repeat from BO2 to validate both producers.
+
+## Build Validation
+
+All three modules were validated with:
+
+```bash
+./mvnw -q -DskipTests package
+```
+
+inside each module directory.

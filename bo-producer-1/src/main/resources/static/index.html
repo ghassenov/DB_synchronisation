@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BO1 Sales Console</title>
+  <style>
+    :root {
+      --bg: #f7f3ea;
+      --ink: #1f2833;
+      --panel: #fffdf7;
+      --line: #ddd2bb;
+      --accent: #0f6b5b;
+      --accent-2: #b84f2a;
+      --muted: #6d6a62;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: radial-gradient(circle at 10% 15%, #fff8df, #f7f3ea 60%);
+      font-family: "Trebuchet MS", "Lucida Sans Unicode", sans-serif;
+      padding: 1.5rem;
+    }
+
+    .shell {
+      max-width: 1180px;
+      margin: 0 auto;
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: 360px 1fr;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: 0 10px 24px rgba(63, 49, 22, 0.08);
+      overflow: hidden;
+    }
+
+    .head {
+      padding: 1rem 1.1rem;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(120deg, #fff5ce, #ffe6c6);
+    }
+
+    .head h1, .head h2 {
+      margin: 0;
+      font-size: 1.1rem;
+      letter-spacing: 0.2px;
+    }
+
+    .sub {
+      margin-top: 0.35rem;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .body {
+      padding: 0.95rem 1.05rem 1.1rem;
+    }
+
+    .fields {
+      display: grid;
+      gap: 0.6rem;
+      grid-template-columns: 1fr 1fr;
+    }
+
+    label {
+      display: grid;
+      gap: 0.3rem;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    input {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0.52rem 0.58rem;
+      font-size: 0.92rem;
+      background: #fff;
+    }
+
+    .actions {
+      margin-top: 0.9rem;
+      display: flex;
+      gap: 0.55rem;
+      flex-wrap: wrap;
+    }
+
+    button {
+      border: none;
+      border-radius: 8px;
+      padding: 0.52rem 0.85rem;
+      font-size: 0.9rem;
+      color: #fff;
+      cursor: pointer;
+      background: var(--accent);
+    }
+
+    button.secondary {
+      background: #888074;
+    }
+
+    button.warn {
+      background: var(--accent-2);
+    }
+
+    .status {
+      margin-top: 0.8rem;
+      font-size: 0.9rem;
+      color: var(--muted);
+      min-height: 1.2rem;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+
+    th, td {
+      padding: 0.55rem 0.48rem;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      background: #f1eadb;
+      z-index: 1;
+    }
+
+    tbody tr:hover {
+      background: #fff4da;
+    }
+
+    .table-wrap {
+      max-height: 65vh;
+      overflow: auto;
+    }
+
+    @media (max-width: 980px) {
+      .shell {
+        grid-template-columns: 1fr;
+      }
+
+      .table-wrap {
+        max-height: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="card">
+      <div class="head">
+        <h1>BO1 Sales Console</h1>
+        <div class="sub">Insert, update, and delete local rows. Changes are synced to HO through RabbitMQ.</div>
+      </div>
+      <div class="body">
+        <form id="saleForm">
+          <div class="fields">
+            <label>Date<input id="date" type="date" required /></label>
+            <label>Region<input id="region" type="text" required /></label>
+            <label>Product<input id="product" type="text" required /></label>
+            <label>Qty<input id="qty" type="number" min="0" required /></label>
+            <label>Cost<input id="cost" type="number" step="0.01" min="0" required /></label>
+            <label>Amt<input id="amt" type="number" step="0.01" min="0" required /></label>
+            <label>Tax<input id="tax" type="number" step="0.01" min="0" required /></label>
+            <label>Total<input id="total" type="number" step="0.01" min="0" required /></label>
+          </div>
+          <div class="actions">
+            <button type="submit" id="saveBtn">Create</button>
+            <button type="button" class="secondary" id="clearBtn">Clear</button>
+            <button type="button" class="secondary" id="refreshBtn">Refresh</button>
+            <button type="button" class="warn" id="deleteBtn" disabled>Delete Selected</button>
+          </div>
+        </form>
+        <div class="status" id="status"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="head">
+        <h2>Local BO1 Database</h2>
+        <div class="sub">Click a row to edit</div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Date</th>
+              <th>Region</th>
+              <th>Product</th>
+              <th>Qty</th>
+              <th>Cost</th>
+              <th>Amt</th>
+              <th>Tax</th>
+              <th>Total</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const form = document.getElementById("saleForm");
+    const rowsEl = document.getElementById("rows");
+    const statusEl = document.getElementById("status");
+    const deleteBtn = document.getElementById("deleteBtn");
+    const saveBtn = document.getElementById("saveBtn");
+
+    let selectedId = null;
+
+    function asNumber(value) {
+      return Number.parseFloat(value);
+    }
+
+    function clearForm() {
+      selectedId = null;
+      form.reset();
+      saveBtn.textContent = "Create";
+      deleteBtn.disabled = true;
+      statusEl.textContent = "";
+      [...rowsEl.children].forEach((tr) => tr.style.background = "");
+    }
+
+    function requestBody() {
+      return {
+        date: document.getElementById("date").value,
+        region: document.getElementById("region").value,
+        product: document.getElementById("product").value,
+        qty: Number.parseInt(document.getElementById("qty").value, 10),
+        cost: asNumber(document.getElementById("cost").value),
+        amt: asNumber(document.getElementById("amt").value),
+        tax: asNumber(document.getElementById("tax").value),
+        total: asNumber(document.getElementById("total").value)
+      };
+    }
+
+    async function loadRows() {
+      const response = await fetch("/api/sales");
+      if (!response.ok) {
+        throw new Error(`Failed to fetch rows (${response.status})`);
+      }
+      const rows = await response.json();
+      rowsEl.innerHTML = "";
+
+      for (const row of rows) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${row.id}</td>
+          <td>${row.date ?? ""}</td>
+          <td>${row.region ?? ""}</td>
+          <td>${row.product ?? ""}</td>
+          <td>${row.qty ?? ""}</td>
+          <td>${row.cost ?? ""}</td>
+          <td>${row.amt ?? ""}</td>
+          <td>${row.tax ?? ""}</td>
+          <td>${row.total ?? ""}</td>
+        `;
+
+        tr.addEventListener("click", () => {
+          selectedId = row.id;
+          document.getElementById("date").value = row.date ?? "";
+          document.getElementById("region").value = row.region ?? "";
+          document.getElementById("product").value = row.product ?? "";
+          document.getElementById("qty").value = row.qty ?? "";
+          document.getElementById("cost").value = row.cost ?? "";
+          document.getElementById("amt").value = row.amt ?? "";
+          document.getElementById("tax").value = row.tax ?? "";
+          document.getElementById("total").value = row.total ?? "";
+
+          saveBtn.textContent = "Update";
+          deleteBtn.disabled = false;
+          statusEl.textContent = `Editing row ${row.id}`;
+
+          [...rowsEl.children].forEach((x) => x.style.background = "");
+          tr.style.background = "#ffe8c0";
+        });
+
+        rowsEl.appendChild(tr);
+      }
+
+      if (!rows.length) {
+        statusEl.textContent = "No rows yet.";
+      }
+    }
+
+    async function createOrUpdate(event) {
+      event.preventDefault();
+      const payload = requestBody();
+      const url = selectedId ? `/api/sales/${selectedId}` : "/api/sales";
+      const method = selectedId ? "PUT" : "POST";
+
+      const response = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        throw new Error(`Save failed (${response.status})`);
+      }
+
+      statusEl.textContent = selectedId ? "Row updated and queued for sync." : "Row created and queued for sync.";
+      clearForm();
+      await loadRows();
+    }
+
+    async function deleteRow() {
+      if (!selectedId) {
+        return;
+      }
+      const response = await fetch(`/api/sales/${selectedId}`, { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error(`Delete failed (${response.status})`);
+      }
+      statusEl.textContent = `Row ${selectedId} deleted and queued for sync.`;
+      clearForm();
+      await loadRows();
+    }
+
+    form.addEventListener("submit", async (event) => {
+      try {
+        await createOrUpdate(event);
+      } catch (error) {
+        statusEl.textContent = error.message;
+      }
+    });
+
+    document.getElementById("deleteBtn").addEventListener("click", async () => {
+      try {
+        await deleteRow();
+      } catch (error) {
+        statusEl.textContent = error.message;
+      }
+    });
+
+    document.getElementById("clearBtn").addEventListener("click", clearForm);
+    document.getElementById("refreshBtn").addEventListener("click", async () => {
+      try {
+        await loadRows();
+        statusEl.textContent = "Rows refreshed.";
+      } catch (error) {
+        statusEl.textContent = error.message;
+      }
+    });
+
+    loadRows().catch((error) => {
+      statusEl.textContent = error.message;
+    });
+  </script>
+</body>
+</html>
